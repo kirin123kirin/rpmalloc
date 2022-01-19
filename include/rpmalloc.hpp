@@ -1,9 +1,8 @@
-/* ccore.cpp | MIT License | https://github.com/kirin123kirin/ccore/raw/LICENSE
-  Changelog. 
-    * header only library from rpmalloc.h and rpmmalloc.c . (2022/01/19 by kirin)
-*/
-
-/* rpmalloc.c  -  Memory allocator  -  Public Domain  -  2016-2020 Mattias Jansson
+/* ccore.cpp | MIT License | https://github.com/kirin123kirin/rpmalloc/blob/develop/LICENSE
+ *  Changelog. 
+ *   * header only library from rpmalloc.h and rpmmalloc.c . (2022/01/19 by kirin)
+ *
+ * rpmalloc.c  -  Memory allocator  -  Public Domain  -  2016-2020 Mattias Jansson
  *
  * This library provides a cross-platform lock free thread caching malloc implementation in C11.
  * The latest source code is always available at
@@ -61,10 +60,6 @@
 //! Enable asserts
 #define ENABLE_ASSERTS            0
 #endif
-#ifndef ENABLE_OVERRIDE
-//! Override standard library malloc/free and new/delete entry points
-#define ENABLE_OVERRIDE           0
-#endif
 #ifndef ENABLE_PRELOAD
 //! Support preloading
 #define ENABLE_PRELOAD            0
@@ -79,7 +74,7 @@
 #endif
 #ifndef ENABLE_ADAPTIVE_THREAD_CACHE
 //! Enable adaptive thread cache size based on use heuristics
-#define ENABLE_ADAPTIVE_THREAD_CACHE 0
+#define ENABLE_ADAPTIVE_THREAD_CACHE 16 /* @note default 0 */
 #endif
 #ifndef DEFAULT_SPAN_MAP_COUNT
 //! Default number of spans to map in call to map more virtual memory (default values yield 4MiB here)
@@ -87,15 +82,8 @@
 #endif
 #ifndef GLOBAL_CACHE_MULTIPLIER
 //! Multiplier for global cache
-#define GLOBAL_CACHE_MULTIPLIER   8
+#define GLOBAL_CACHE_MULTIPLIER   16
 #endif
-
-//! Flag to rpaligned_realloc to not preserve content in reallocation
-#define RPMALLOC_NO_PRESERVE    1
-//! Flag to rpaligned_realloc to fail and return null pointer if grow cannot be done in-place,
-//  in which case the original pointer is still valid (just like a call to realloc which failes to allocate
-//  a new block).
-#define RPMALLOC_GROW_OR_FAIL   2
 
 #if DISABLE_UNMAP && !ENABLE_GLOBAL_CACHE
 #error Must use global cache if unmap is disabled
@@ -218,6 +206,10 @@ extern int madvise(caddr_t, size_t, int);
 #if ENABLE_STATISTICS
 #  include <stdio.h>
 #endif
+
+// prototype
+
+extern inline int rpmalloc_initialize(void);
 
 typedef struct rpmalloc_config_t {
 	//! Map memory pages for the given number of bytes. The returned address MUST be
@@ -869,12 +861,6 @@ _rpmalloc_spin(void) {
 #if defined(_WIN32) && (!defined(BUILD_DYNAMIC_LINK) || !BUILD_DYNAMIC_LINK)
 static void NTAPI
 _rpmalloc_thread_destructor(void* value) {
-#if ENABLE_OVERRIDE
-	// If this is called on main thread it means rpmalloc_finalize
-	// has not been called and shutdown is forced (through _exit) or unclean
-	if (get_thread_id() == _rpmalloc_main_thread_id)
-		return;
-#endif
 	if (value)
 		rpmalloc_thread_finalize(1);
 }
@@ -1418,6 +1404,7 @@ _rpmalloc_global_cache_finalize(global_cache_t* cache) {
 	atomic_store32_release(&cache->lock, 0);
 }
 
+#if ENABLE_THREAD_CACHE
 static void
 _rpmalloc_global_cache_insert_spans(span_t** span, size_t span_count, size_t count) {
 	const size_t cache_limit = (span_count == 1) ? 
@@ -1496,6 +1483,7 @@ _rpmalloc_global_cache_insert_spans(span_t** span, size_t span_count, size_t cou
 		atomic_store32_release(&cache->lock, 0);
 	}
 }
+#endif
 
 static size_t
 _rpmalloc_global_cache_extract_spans(span_t** span, size_t span_count, size_t count) {
@@ -3341,6 +3329,7 @@ rpmalloc_dump_statistics(FILE* file) {
 	fprintf(file, "HugeCurrentMiB HugePeakMiB\n");
 	fprintf(file, "%14zu %11zu\n", huge_current / (size_t)(1024 * 1024), huge_peak / (size_t)(1024 * 1024));
 
+#if ENABLE_GLOBAL_CACHE
 	fprintf(file, "GlobalCacheMiB\n");
 	for (size_t iclass = 0; iclass < LARGE_CLASS_COUNT; ++iclass) {
 		global_cache_t* cache = _memory_span_cache + iclass;
@@ -3355,7 +3344,7 @@ rpmalloc_dump_statistics(FILE* file) {
 		if (global_cache || global_overflow_cache || cache->insert_count || cache->extract_count)
 			fprintf(file, "%4zu: %8zuMiB (%8zuMiB overflow) %14zu insert %14zu extract\n", iclass + 1, global_cache / (size_t)(1024 * 1024), global_overflow_cache / (size_t)(1024 * 1024), cache->insert_count, cache->extract_count);
 	}
-
+#endif
 	size_t mapped = (size_t)atomic_load32(&_mapped_pages) * _memory_page_size;
 	size_t mapped_os = (size_t)atomic_load32(&_mapped_pages_os) * _memory_page_size;
 	size_t mapped_peak = (size_t)_mapped_pages_peak * _memory_page_size;
@@ -3384,7 +3373,8 @@ rpmalloc_dump_statistics(FILE* file) {
 }
 
 #if RPMALLOC_FIRST_CLASS_HEAPS
-typedef struct heap_t rpmalloc_heap_t;
+using rpmalloc_heap_t = heap_t ;
+// typedef struct heap_t rpmalloc_heap_t;
 
 //@todo overload error
 extern inline rpmalloc_heap_t*
@@ -3428,11 +3418,6 @@ rpmalloc_heap_aligned_alloc(rpmalloc_heap_t* heap, size_t alignment, size_t size
 }
 
 extern inline void*
-rpmalloc_heap_calloc(rpmalloc_heap_t* heap, size_t num, size_t size) {
-	return rpmalloc_heap_aligned_calloc(heap, 0, num, size);
-}
-
-extern inline void*
 rpmalloc_heap_aligned_calloc(rpmalloc_heap_t* heap, size_t alignment, size_t num, size_t size) {
 	size_t total;
 #if ENABLE_VALIDATE_ARGS
@@ -3456,6 +3441,11 @@ rpmalloc_heap_aligned_calloc(rpmalloc_heap_t* heap, size_t alignment, size_t num
 	if (block)
 		memset(block, 0, total);
 	return block;
+}
+
+extern inline void*
+rpmalloc_heap_calloc(rpmalloc_heap_t* heap, size_t num, size_t size) {
+	return rpmalloc_heap_aligned_calloc(heap, 0, num, size);
 }
 
 extern inline void*
